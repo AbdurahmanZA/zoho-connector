@@ -1,0 +1,20 @@
+{
+  "_note": "Made-up customers for trying the sync. example.com addresses never receive mail.",
+  "customers": [
+    {
+      "id": "crm-001",
+      "company": "Acme Plumbing (Example)",
+      "vatNumber": "",
+      "paymentTermsDays": 30,
+      "address": { "street": "1 Example Road", "city": "Springfield", "region": "", "postalCode": "0000", "country": "South Africa" },
+      "contact": { "firstName": "Alex", "lastName": "Sample", "email": "alex@acme.example.com", "phone": "+27 00 000 0000" }
+    },
+    {
+      "id": "crm-002",
+      "company": "Northwind Traders (Example)",
+      "paymentTermsDays": 7,
+      "address": { "street": "22 Demo Street", "city": "Riverside", "region": "", "postalCode": "0000", "country": "South Africa" },
+      "contact": { "firstName": "Sam", "lastName": "Placeholder", "email": "sam@northwind.example.com", "phone": "+27 00 000 0001" }
+    }
+  ]
+}
