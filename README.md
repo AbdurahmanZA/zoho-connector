@@ -1,14 +1,21 @@
 # Zoho Connector
 
-**Connect Zoho Books to your own CRM**: customers, quotes and invoices, with OAuth that works in
-every Zoho data center. Node 20+, no dependencies.
+**Connect your own CRM to Zoho Books, and have it still work next month.**
+
+Getting a token out of Zoho takes an afternoon. Keeping two systems in agreement takes longer:
+the "invalid_code" that is really the wrong data center, the duplicate customer on every re-sync,
+the second invoice created by a retry. This is the connector we use in production, with those
+lessons built in. Customers, quotes and invoices, OAuth that works in every Zoho data center,
+19 tests, Node 20+ and zero dependencies.
+
+*Built and maintained by [SANDZ](https://www.sandz.co.za) · MIT licensed.*
 
 ```js
 const { ZohoClient, Books } = require('zoho-connector');
 const books = new Books(ZohoClient.fromEnv());
 
 const { contact } = await books.upsertContact(crmCustomerAsZoho, { zohoId: row.zoho_id });
-const balance    = await books.customerBalance(contact.contact_id);   // { billed, outstanding, overdue }
+const balance    = await books.customerBalance(contact.contact_id);   // { outstanding, unusedCredits, overdue, currency }
 const invoice    = await books.invoiceFromEstimate(acceptedQuoteId);
 ```
 
@@ -24,7 +31,8 @@ Every "connect our CRM to Zoho" project hits the same walls:
 - **Token errors arrive as HTTP 200** with `{"error": …}`, and API errors as a non-zero
   `code` in the body. Both throw a `ZohoError` here.
 - **429s at 100 calls a minute.** Retries honour `Retry-After` with backoff. A 401 triggers one
-  silent token refresh.
+  silent token refresh. Writes are never retried after a server error, so a flaky network can't
+  create a second invoice.
 - **Duplicates on every re-sync.** Upsert by stored id, then by exact email, never blindly create
   (see [docs/SYNC.md](docs/SYNC.md)).
 
@@ -37,7 +45,7 @@ node bin/zoho-auth.js self-client --code 1000.xxxx --dc us   # or: browser --dc 
 #  -> paste the printed ZOHO_* lines into .env
 node --env-file=.env examples/crm-sync.js examples/sample-crm.json          # dry run
 node --env-file=.env examples/crm-sync.js examples/sample-crm.json --apply  # really write
-npm test                                   # 14 tests, no network
+npm test                                   # 19 tests, no network
 ```
 
 [docs/SETUP.md](docs/SETUP.md) walks through the Zoho API Console (Self Client vs Server-based app,
@@ -52,7 +60,7 @@ scopes, data centers, limits).
 | `src/oauth.js` | `authUrl()` with state, `exchangeCode()`, `revoke()`, least-privilege default scopes. |
 | `bin/zoho-auth.js` | One-time CLI to get a refresh token (Self Client code, or a local browser round-trip) and list your organisations. |
 | `examples/crm-sync.js` | Push CRM customers into Books: dry-run first, an id map so re-runs never duplicate. |
-| `examples/express-routes.js` | A "Connect Zoho" button for your CRM: connect, callback with state check, status, disconnect (revoke), balance, quote → invoice. |
+| `examples/express-routes.js` | A "Connect Zoho" button for your CRM: admin-only connect with the state tied to the signed-in admin, status, disconnect (revoke), balance, quote → invoice that is safe to click twice. |
 | `docs/SYNC.md` | The rules that keep two systems agreeing, plus the errors you'll meet and their fixes. |
 
 ## API at a glance
@@ -66,8 +74,8 @@ for await (const c of books.listContacts()) { /* every customer, 200 per page */
 await books.findContactByEmail('alex@acme.example.com');
 await books.upsertContact(contact, { zohoId, email });   // -> { contact, action: 'created' | 'updated' }
 await books.createEstimate({ customer_id, line_items: [{ name: 'Install', rate: 1500, quantity: 1 }] });
-await books.invoiceFromEstimate(estimateId);
-await books.customerBalance(customerId);                  // drafts and voids excluded
+await books.invoiceFromEstimate(estimateId);              // returns the existing invoice if already done
+await books.customerBalance(customerId);                  // Zoho's own outstanding, net of credits
 
 // Anything else in Zoho's APIs:
 await client.request('books', 'GET', '/customerpayments', { query: { customer_id } });
@@ -79,9 +87,16 @@ await client.request('crm', 'GET', '/Leads', { query: { per_page: 50 } });
 - The refresh token is a long-lived credential. Keep it server-side and out of git
   (`.gitignore` covers `.env`), and encrypt it at rest if you store one per customer.
 - The library never logs tokens or token responses. Keep your own logging that way too.
-- The browser flow checks `state` on the callback. Don't remove that check.
+- The browser flow checks `state` on the callback, and only a real Zoho accounts server ever receives
+  your client secret (the `accounts-server` on the redirect is checked against Zoho's list).
+- Tokens and secrets travel in request bodies, never in URLs, so they stay out of proxy logs.
 - Ask for the smallest scopes you need. The defaults are contacts, estimates, invoices and settings.READ.
 
-## Licence
+## About
 
-MIT. Built by [SANDZ](https://www.sandz.co.za).
+Zoho Connector is built and maintained by **[SANDZ](https://www.sandz.co.za)**, a software studio
+that builds CRMs, dashboards and integrations for small businesses. It started as the Zoho Books
+link inside our own CRM.
+
+Issues and pull requests are welcome. MIT licence, see [LICENSE](LICENSE).
+Visit **[www.sandz.co.za](https://www.sandz.co.za)**.

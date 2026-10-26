@@ -39,12 +39,19 @@ async function finish(tokens, a) {
     console.error(`(Could not list organisations: ${e.message}. The token still works if you skipped ZohoBooks.settings.READ.)`);
   }
   if (orgs.length === 1) lines.push(`ZOHO_ORG_ID=${orgs[0].organization_id}`);
+  let written = false;
   if (a.write) {
-    fs.appendFileSync(a.write, '\n' + lines.join('\n') + '\n', { mode: 0o600 });
-    console.log(`Wrote ${lines.length} lines to ${a.write}.`);
-  } else {
-    console.log('\nAdd these to your .env (keep it out of git):\n\n' + lines.join('\n') + '\n');
+    try {
+      fs.appendFileSync(a.write, '\n' + lines.join('\n') + '\n', { mode: 0o600 });
+      try { fs.chmodSync(a.write, 0o600); } catch { /* Windows: no POSIX modes */ }   // an existing .env keeps its old mode otherwise
+      console.log(`Wrote ${lines.length} lines to ${a.write} (later lines win if a key repeats).`);
+      written = true;
+    } catch (e) {
+      console.error(`Could not write ${a.write}: ${e.message}`);
+    }
   }
+  // The code is single-use, so never lose the token: print it whenever it wasn't written.
+  if (!written) console.log('\nAdd these to your .env (keep it out of git):\n\n' + lines.join('\n') + '\n');
   if (orgs.length > 1) {
     console.log('This login sees several organisations. Pick one for ZOHO_ORG_ID:');
     for (const o of orgs) console.log(`  ${o.organization_id}  ${o.name}${o.is_default_org ? '  (default)' : ''}`);
@@ -63,6 +70,7 @@ async function main() {
                 'options: --scopes a,b,c   --write .env   (see docs/SETUP.md)');
     process.exit(2);
   }
+  if (a.write === true) { console.log('--write needs a file name, e.g. --write .env'); process.exit(2); }
 
   if (mode === 'self-client') {
     if (!a.code) throw new Error('--code is required (Zoho API Console > Self Client > Generate Code)');
@@ -79,11 +87,14 @@ async function main() {
       const u = new URL(req.url, redirectUri);
       if (u.pathname !== '/callback') { res.writeHead(404).end(); return; }
       const done = (code, msg) => { res.writeHead(code, { 'Content-Type': 'text/plain' }).end(msg); srv.close(); };
-      if (u.searchParams.get('state') !== state) {      // not our request (or a stale tab): refuse
-        done(400, 'State mismatch - start again.'); return reject(new Error('state mismatch'));
+      if (u.searchParams.get('state') !== state) {
+        // Not our request (a stale tab, or someone else's link): refuse it but keep waiting for ours.
+        res.writeHead(400, { 'Content-Type': 'text/plain' }).end('This link is not from the current sign-in. Use the URL in the terminal.');
+        return;
       }
       if (u.searchParams.get('error')) {
-        done(400, 'Zoho said: ' + u.searchParams.get('error')); return reject(new Error(u.searchParams.get('error')));
+        const err = String(u.searchParams.get('error')).slice(0, 100);
+        done(400, 'Zoho said: ' + err); return reject(new Error(err));
       }
       try {
         const tokens = await exchangeCode({ code: u.searchParams.get('code'), clientId: a.clientId, clientSecret: a.clientSecret,
@@ -93,6 +104,7 @@ async function main() {
         resolve();
       } catch (e) { done(500, e.message); reject(e); }
     });
+    srv.on('error', (e) => reject(new Error(e.code === 'EADDRINUSE' ? `port ${port} is in use; try --port 8766 (and register that redirect URI)` : e.message)));
     srv.listen(port, '127.0.0.1', () => {
       console.log(`Redirect URI to register in the Zoho API Console: ${redirectUri}\n\nOpen this URL and approve:\n\n${url}\n`);
     });

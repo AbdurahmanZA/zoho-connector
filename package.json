@@ -3,13 +3,26 @@
   "version": "1.0.0",
   "description": "Connect Zoho Books to your own CRM: OAuth done right (every data center), customers, quotes, invoices. Zero dependencies.",
   "main": "src/index.js",
-  "bin": { "zoho-auth": "bin/zoho-auth.js" },
+  "bin": {
+    "zoho-auth": "bin/zoho-auth.js"
+  },
   "scripts": {
     "test": "node test/connector.test.js",
     "auth": "node bin/zoho-auth.js",
     "sync": "node --env-file=.env examples/crm-sync.js examples/sample-crm.json"
   },
-  "engines": { "node": ">=20.6" },
-  "keywords": ["zoho", "zoho-books", "crm", "oauth", "invoices", "integration"],
-  "license": "MIT"
+  "engines": {
+    "node": ">=20.6"
+  },
+  "keywords": [
+    "zoho",
+    "zoho-books",
+    "crm",
+    "oauth",
+    "invoices",
+    "integration"
+  ],
+  "license": "MIT",
+  "author": "SANDZ (https://www.sandz.co.za)",
+  "homepage": "https://www.sandz.co.za"
 }

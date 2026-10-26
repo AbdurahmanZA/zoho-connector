@@ -3,18 +3,29 @@
 //
 //   const express = require('express');
 //   const app = express(); app.use(express.json());
-//   require('./examples/express-routes')(app, { store: myTokenStore, requireUser: myAuthMiddleware });
+//   require('./examples/express-routes')(app, {
+//     store: myTokenStore,          // get()/set(obj): the connection, in your DB, encrypted at rest
+//     requireUser: mySignedIn,      // any signed-in CRM user (reads)
+//     requireAdmin: myAdminOnly,    // only admins may connect or disconnect the company's Zoho
+//     userId: (req) => req.user.id, // who is signed in
+//   });
 //
-// `store` is yours: get()/set(obj) for { refreshToken, dc, accountsServer, apiDomain, orgId },
-// kept in your database and encrypted at rest. Never put the refresh token in the browser.
+// State-changing routes are POST and expect your CRM's usual CSRF protection (same-site cookies
+// plus a CSRF token or a custom header). Never put the refresh token in the browser.
 const { authUrl, exchangeCode, revoke, ZohoClient, Books } = require('../src');
 
-module.exports = function mountZoho(app, { store, requireUser, baseUrl = process.env.PUBLIC_URL }) {
+module.exports = function mountZoho(app, { store, requireUser, requireAdmin, userId, baseUrl = process.env.PUBLIC_URL }) {
+  if (!requireAdmin || !userId) throw new Error('mountZoho needs requireAdmin and userId');
   const clientId = process.env.ZOHO_CLIENT_ID;
   const clientSecret = process.env.ZOHO_CLIENT_SECRET;
   const redirectUri = `${baseUrl}/integrations/zoho/callback`;
-  const pending = new Map();                 // state -> expiry (use your session store in production)
+  // state -> { user, expires }. Tied to the admin who started the flow, so a callback link someone
+  // else started (e.g. for THEIR Zoho account) can't connect your CRM to it. In production keep this
+  // in your session store.
+  const pending = new Map();
   let books = null;                          // cached client, rebuilt when the connection changes
+
+  const plain = (res, status, text) => res.status(status).type('text/plain').send(text);   // no HTML: no XSS
 
   async function getBooks() {
     if (books) return books;
@@ -25,32 +36,33 @@ module.exports = function mountZoho(app, { store, requireUser, baseUrl = process
     return books;
   }
 
-  // 1. The "Connect Zoho" button links here.
-  app.get('/integrations/zoho/connect', requireUser, (req, res) => {
-    const { url, state } = authUrl({ clientId, redirectUri, dc: req.query.dc || 'us' });
-    pending.set(state, Date.now() + 10 * 60 * 1000);
-    res.redirect(url);
+  // 1. The "Connect Zoho" button POSTs here (POST, so a stray link or image can't start it).
+  app.post('/integrations/zoho/connect', requireAdmin, (req, res) => {
+    const { url, state } = authUrl({ clientId, redirectUri, dc: req.body?.dc || 'us' });
+    pending.set(state, { user: userId(req), expires: Date.now() + 10 * 60 * 1000 });
+    res.json({ url });                       // the page then sends the browser to it
   });
 
   // 2. Zoho sends the user back here. Register this exact URL in the Zoho API Console.
-  app.get('/integrations/zoho/callback', requireUser, async (req, res) => {
-    const exp = pending.get(req.query.state);
+  app.get('/integrations/zoho/callback', requireAdmin, async (req, res) => {
+    const p = pending.get(req.query.state);
     pending.delete(req.query.state);
-    if (!exp || exp < Date.now()) return res.status(400).send('This link expired. Start again from Settings.');
-    if (req.query.error) return res.status(400).send('Zoho said: ' + req.query.error);
+    if (!p || p.expires < Date.now() || p.user !== userId(req)) return plain(res, 400, 'This link expired or was not started by you. Start again from Settings.');
+    if (req.query.error) return plain(res, 400, 'Zoho said: ' + String(req.query.error).slice(0, 100));
     try {
+      // exchangeCode only accepts a real Zoho accounts server, so the secret can't be sent elsewhere.
       const t = await exchangeCode({ code: req.query.code, clientId, clientSecret, redirectUri,
-        accountsServer: req.query['accounts-server'] });           // the user's real data center
+        accountsServer: req.query['accounts-server'] });
       const tmp = new Books(new ZohoClient({ clientId, clientSecret, refreshToken: t.refreshToken, dc: t.dc,
         accountsServer: t.accountsServer, apiDomain: t.apiDomain }));
       const orgs = await tmp.organizations();
-      const org = orgs.find(o => o.is_default_org) || orgs[0];
+      const org = orgs.find((o) => o.is_default_org) || orgs[0];
       await store.set({ ...t, accessToken: undefined, orgId: org?.organization_id, orgName: org?.name });
       books = null;
       res.redirect('/settings?zoho=connected');
     } catch (e) {
       console.error('[zoho] connect failed:', e.message);       // never log the token response
-      res.status(500).send('Could not connect Zoho: ' + e.message);
+      plain(res, 500, 'Could not connect Zoho. Check the server log, then try again from Settings.');
     }
   });
 
@@ -65,7 +77,7 @@ module.exports = function mountZoho(app, { store, requireUser, baseUrl = process
   });
 
   // 4. Disconnect: revoke at Zoho, then forget it here.
-  app.post('/api/zoho/disconnect', requireUser, async (req, res) => {
+  app.post('/api/zoho/disconnect', requireAdmin, async (req, res) => {
     const t = await store.get();
     if (t?.refreshToken) await revoke({ token: t.refreshToken, accountsServer: t.accountsServer }).catch(() => {});
     await store.set(null); books = null;
@@ -80,6 +92,7 @@ module.exports = function mountZoho(app, { store, requireUser, baseUrl = process
     catch (e) { res.status(e.status || 500).json({ error: e.message }); }
   });
 
+  // Safe to click twice: invoiceFromEstimate returns the existing invoice instead of billing again.
   app.post('/api/quotes/:estimateId/invoice', requireUser, async (req, res) => {
     const b = await getBooks();
     if (!b) return res.status(409).json({ error: 'Zoho not connected' });
@@ -88,6 +101,6 @@ module.exports = function mountZoho(app, { store, requireUser, baseUrl = process
   });
 
   // Housekeeping for the in-memory state map.
-  setInterval(() => { for (const [s, exp] of pending) if (exp < Date.now()) pending.delete(s); }, 60000).unref();
+  setInterval(() => { for (const [s, p] of pending) if (p.expires < Date.now()) pending.delete(s); }, 60000).unref();
   return { getBooks };
 };

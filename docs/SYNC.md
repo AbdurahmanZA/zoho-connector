@@ -52,8 +52,10 @@ the invoice's reference, so accounting can trace every invoice back to its quote
 |---|---|---|
 | `invalid_code` on connect | Code expired or already used, **or wrong data center** | Generate a new code, check `ZOHO_DC` |
 | `invalid_client` | Client ID/secret wrong, or the user is in another DC and Multi-DC is off | Check the console; enable Multi-DC |
-| HTTP 401 / code 57 | Access token expired or revoked | The client refreshes and retries once on its own |
-| HTTP 429 / code 44 | Over 100 calls a minute | The client backs off and retries. Batch your syncs |
+| HTTP 401 | Access token expired or revoked | The client refreshes once on its own; a 401 straight after a refresh is reported, not retried |
+| code 57 "not authorized" | Missing scope, or the user lacks permission in that organisation | Reconnect with the right scopes / check the user's role in Books |
+| HTTP 429 / code 44 | Over 100 calls a minute | The client backs off (5 s, 10 s, 20 s) and retries. Batch your syncs |
+| A create fails with a server error | Zoho may or may not have saved it | Writes are NOT retried automatically (a retry could bill twice); check, then try again |
 | code 1002 "does not exist" | Deleted in Books | `upsertContact` falls back to email |
 | `organizationId is required` | `ZOHO_ORG_ID` not set | Run `bin/zoho-auth.js`. It lists your organisations |
 

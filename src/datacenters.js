@@ -28,4 +28,11 @@ function dcForAccountsServer(url) {
   return Object.keys(DATACENTERS).find(k => DATACENTERS[k].accounts === u) || null;
 }
 
-module.exports = { DATACENTERS, datacenter, dcForAccountsServer };
+/** The accounts-server URL if it is one of Zoho's, else throw (never send a client secret elsewhere). */
+function trustedAccountsServer(url) {
+  const dc = dcForAccountsServer(url);
+  if (!dc) throw new Error(`"${String(url).slice(0, 80)}" is not a Zoho accounts server`);
+  return DATACENTERS[dc].accounts;
+}
+
+module.exports = { DATACENTERS, datacenter, dcForAccountsServer, trustedAccountsServer };

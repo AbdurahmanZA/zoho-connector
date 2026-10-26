@@ -1,6 +1,6 @@
 'use strict';
 const crypto = require('node:crypto');
-const { datacenter, dcForAccountsServer } = require('./datacenters');
+const { datacenter, dcForAccountsServer, trustedAccountsServer } = require('./datacenters');
 
 // Least privilege for a CRM <-> Books link: customers, quotes, invoices, and reading the org list.
 const DEFAULT_SCOPES = [
@@ -30,10 +30,13 @@ function authUrl({ clientId, redirectUri, scopes = DEFAULT_SCOPES, dc = 'us', st
  * Returns { refreshToken, accessToken, expiresIn, apiDomain, accountsServer, dc }.
  */
 async function exchangeCode({ code, clientId, clientSecret, redirectUri, dc = 'us', accountsServer, fetch = globalThis.fetch }) {
-  const server = (accountsServer || datacenter(dc).accounts).replace(/\/+$/, '');
-  const q = new URLSearchParams({ code, client_id: clientId, client_secret: clientSecret, grant_type: 'authorization_code' });
-  if (redirectUri) q.set('redirect_uri', redirectUri);
-  const r = await fetch(`${server}/oauth/v2/token?${q}`, { method: 'POST', signal: AbortSignal.timeout(30000) });
+  // The accounts server arrives on the redirect URL, so it is attacker-controllable: only ever send
+  // the client secret to a real Zoho accounts server.
+  const server = accountsServer ? trustedAccountsServer(accountsServer) : datacenter(dc).accounts;
+  const form = new URLSearchParams({ code, client_id: clientId, client_secret: clientSecret, grant_type: 'authorization_code' });
+  if (redirectUri) form.set('redirect_uri', redirectUri);
+  const r = await fetch(`${server}/oauth/v2/token`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: form.toString(), signal: AbortSignal.timeout(30000) });
   const data = await r.json().catch(() => ({}));
   if (!r.ok || data.error) {
     throw new Error(`Zoho code exchange failed: ${data.error || 'HTTP ' + r.status}` +
@@ -51,8 +54,9 @@ async function exchangeCode({ code, clientId, clientSecret, redirectUri, dc = 'u
 
 /** Revoke a refresh token (e.g. when a user disconnects Zoho from your CRM). */
 async function revoke({ token, dc = 'us', accountsServer, fetch = globalThis.fetch }) {
-  const server = (accountsServer || datacenter(dc).accounts).replace(/\/+$/, '');
-  const r = await fetch(`${server}/oauth/v2/token/revoke?${new URLSearchParams({ token })}`, { method: 'POST' });
+  const server = accountsServer ? trustedAccountsServer(accountsServer) : datacenter(dc).accounts;
+  const r = await fetch(`${server}/oauth/v2/token/revoke`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ token }).toString(), signal: AbortSignal.timeout(30000) });
   if (!r.ok) throw new Error(`Zoho revoke failed: HTTP ${r.status}`);
   return true;
 }

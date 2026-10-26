@@ -16,6 +16,7 @@ Look at the address bar when you're signed in to Zoho Books:
 | books.zoho**cloud.ca** | `ca` |
 | books.zoho.**sa** | `sa` |
 | books.zoho.**uk** | `uk` |
+| books.zoho.**com.cn** | `cn` |
 
 The most common integration failure is an `invalid_code` or `invalid_client` error that is
 really a **data-center mismatch**. Accounts, tokens and data live in one DC only. The browser
@@ -23,7 +24,8 @@ flow in this repo reads the DC Zoho reports back, so it handles this for you.
 
 ## 2. Create an API client
 
-Open the API Console for your DC (`https://api-console.zoho.<your-dc>`, e.g. api-console.zoho.com)
+Open the API Console for your DC (`https://api-console.zoho.<your-dc>`, e.g. api-console.zoho.com;
+Canada is `https://api-console.zohocloud.ca`)
 and choose one:
 
 **Self Client.** Use this when the CRM is only for your own company. There's no redirect URL and
@@ -47,7 +49,8 @@ no web server.
    ```
    or wire up `examples/express-routes.js` in your CRM.
 3. If your users are in other data centers, enable **Multi-DC** for the client in the console
-   (*Settings* tab of the client), or they will get `invalid_client`.
+   (*Settings* tab of the client), or they will get `invalid_client`. If you leave "use the same OAuth
+credentials for all data centers" off, each DC gets its own client secret.
 
 ## 3. Save the output
 

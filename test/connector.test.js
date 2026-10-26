@@ -60,16 +60,50 @@ test('retries 429 then succeeds; gives up after maxRetries', async () => {
     e => e instanceof ZohoError && e.status === 503);
 });
 
-test('a 401 forces one token refresh and a retry', async () => {
+test('a 401 refreshes the token once and retries; a 401 right after a refresh is reported', async () => {
   let tokens = 0, api = 0;
   const f = fakeFetch(u => {
     if (u.pathname === '/oauth/v2/token') { tokens++; return tokenOk; }
     api++;
     return api === 1 ? { status: 401, body: { code: 57, message: 'Invalid token' } } : { body: { code: 0 } };
   });
-  await new ZohoClient({ ...base, fetch: f }).request('books', 'GET', '/contacts');
-  assert.equal(tokens, 2);
+  const c = new ZohoClient({ ...base, fetch: f });
+  c._token = 'OLD'; c._expires = Date.now() + 3600e3; c._lastRefresh = 0;   // a cached token Zoho has since revoked
+  await c.request('books', 'GET', '/contacts');
+  assert.equal(tokens, 1);
   assert.equal(api, 2);
+  const always = fakeFetch(u => u.pathname === '/oauth/v2/token' ? tokenOk : { status: 401, body: { code: 57, message: 'not authorized' } });
+  const c2 = new ZohoClient({ ...base, fetch: always });
+  await assert.rejects(c2.request('books', 'GET', '/contacts'), e => e.status === 401);
+  assert.equal(always.calls.filter(x => x.url.includes('/oauth/v2/token')).length, 1);   // no refresh storm
+});
+
+test('writes are never retried on a server error; reads are, and also on a dropped connection', async () => {
+  const f = fakeFetch(u => u.pathname === '/oauth/v2/token' ? tokenOk : { status: 502, body: { message: 'bad gateway' } });
+  const c = new ZohoClient({ ...base, fetch: f });
+  await assert.rejects(c.request('books', 'POST', '/invoices', { body: { x: 1 } }), e => e.status === 502);
+  assert.equal(f.calls.filter(x => x.init.method === 'POST' && x.url.includes('/invoices')).length, 1);
+  let n = 0;
+  const flaky = async (url, init) => {
+    if (String(url).includes('/oauth/v2/token')) return fakeFetch(() => tokenOk)(url, init);
+    if (++n === 1) throw new Error('ECONNRESET');
+    return fakeFetch(() => ({ body: { code: 0, ok: 1 } }))(url, init);
+  };
+  const orig = global.setTimeout;
+  global.setTimeout = (fn) => orig(fn, 0);                     // skip the 1 s backoff in the test
+  try { assert.equal((await new ZohoClient({ ...base, fetch: flaky }).request('books', 'GET', '/x')).ok, 1); }
+  finally { global.setTimeout = orig; }
+});
+
+test('the client secret only ever goes to a real Zoho accounts server, in the body', async () => {
+  const f = fakeFetch(() => ({ body: { access_token: 'AT', refresh_token: 'RT' } }));
+  await assert.rejects(exchangeCode({ code: 'c', clientId: 'id', clientSecret: 'SECRET', accountsServer: 'https://evil.example', fetch: f }),
+    /not a Zoho accounts server/);
+  assert.equal(f.calls.length, 0);
+  assert.throws(() => new ZohoClient({ ...base, accountsServer: 'https://evil.example' }), /not a Zoho accounts server/);
+  await exchangeCode({ code: 'c', clientId: 'id', clientSecret: 'SECRET', accountsServer: 'https://accounts.zoho.eu', fetch: f });
+  assert.ok(!f.calls[0].url.includes('SECRET'));
+  assert.match(f.calls[0].init.body, /client_secret=SECRET/);
 });
 
 test('a non-zero Zoho code is an error even with HTTP 200', async () => {
@@ -123,7 +157,27 @@ test('upsert: creates when nobody matches; falls back to email when a stored id 
   });
   const r = await books.upsertContact({ contact_name: 'Acme', contact_persons: [{ email: 'a@example.com' }] }, { zohoId: 'gone' });
   assert.deepEqual(r, { contact: { contact_id: 'new' }, action: 'created' });
-  assert.deepEqual(f.calls.slice(1).map(c => c.init.method), ['PUT', 'GET', 'POST']);
+  assert.deepEqual(f.calls.slice(1).map(c => c.init.method), ['GET', 'PUT', 'GET', 'POST']);
+});
+
+test('upsert: "does not exist" as HTTP 400 + code 1002 also falls back to email', async () => {
+  const { books } = booksWith((u, init) => {
+    if (init.method === 'PUT') return { status: 400, body: { code: 1002, message: 'Contact does not exist.' } };
+    if (init.method === 'GET') return { body: { code: 0, contacts: [] } };
+    return { body: { code: 0, contact: { contact_id: 'new' } } };
+  });
+  assert.equal((await books.upsertContact({ contact_name: 'A', contact_persons: [{ email: 'a@example.com' }] }, { zohoId: 'gone' })).action, 'created');
+});
+
+test('upsert: existing contact persons keep their ids (no duplicate people)', async () => {
+  let put;
+  const { books } = booksWith((u, init, body) => {
+    if (init.method === 'GET') return { body: { code: 0, contact: { contact_id: '7', contact_persons: [{ contact_person_id: 'P1', email: 'Alex@Example.com' }] } } };
+    put = body;
+    return { body: { code: 0, contact: { contact_id: '7' } } };
+  });
+  await books.upsertContact({ contact_name: 'A', contact_persons: [{ email: 'alex@example.com' }, { email: 'new@example.com' }] }, { zohoId: '7' });
+  assert.deepEqual(put.contact_persons, [{ email: 'alex@example.com', contact_person_id: 'P1' }, { email: 'new@example.com' }]);
 });
 
 test('invoiceFromEstimate copies customer, lines and the quote number', async () => {
@@ -139,11 +193,29 @@ test('invoiceFromEstimate copies customer, lines and the quote number', async ()
     line_items: [{ rate: 100, quantity: 2, item_id: 'I1', name: 'Camera', unit: 'pcs' }] });
 });
 
-test('customerBalance skips drafts and voids', async () => {
-  const { books } = booksWith(() => ({ body: { code: 0, invoices: [
-    { status: 'paid', total: 100, balance: 0 }, { status: 'overdue', total: 50.5, balance: 50.5 },
-    { status: 'sent', total: 20, balance: 20 }, { status: 'draft', total: 999, balance: 999 }, { status: 'void', total: 5, balance: 5 }] } }));
-  assert.deepEqual(await books.customerBalance('C1'), { count: 3, billed: 170.5, outstanding: 70.5, overdue: 50.5 });
+test('customerBalance uses Zoho own outstanding figures plus overdue invoices', async () => {
+  const { books } = booksWith((u) => u.pathname.endsWith('/contacts/C1')
+    ? { body: { code: 0, contact: { currency_code: 'ZAR', outstanding_receivable_amount: 70.5, unused_credits_receivable_amount: 10 } } }
+    : { body: { code: 0, invoices: [{ status: 'overdue', balance: 50.5 }, { status: 'overdue', balance: 20 }] } });
+  assert.deepEqual(await books.customerBalance('C1'), { currency: 'ZAR', outstanding: 70.5, unusedCredits: 10, overdue: 70.5, overdueCount: 2 });
+});
+
+test('invoiceFromEstimate is safe to call twice and keeps tax, discount and currency', async () => {
+  let posts = 0, posted;
+  const est = { customer_id: 'C1', estimate_number: 'QT-9', is_inclusive_tax: true, discount: '10%', currency_id: 'USD1',
+    line_items: [{ item_id: 'I1', rate: 5, quantity: 1, hsn_or_sac: '' }] };
+  const existing = [];
+  const { books } = booksWith((u, init, body) => {
+    if (u.pathname.includes('/estimates/')) return { body: { code: 0, estimate: est } };
+    if (init.method === 'GET') return { body: { code: 0, invoices: existing } };
+    posts++; posted = body; existing.push({ invoice_id: 'INV1', reference_number: 'QT-9', status: 'draft' });
+    return { body: { code: 0, invoice: { invoice_id: 'INV1' } } };
+  });
+  assert.equal((await books.invoiceFromEstimate('E1')).invoice_id, 'INV1');
+  assert.equal(posted.is_inclusive_tax, true); assert.equal(posted.discount, '10%'); assert.equal(posted.currency_id, 'USD1');
+  assert.ok(!('hsn_or_sac' in posted.line_items[0]));
+  const again = await books.invoiceFromEstimate('E1');
+  assert.equal(again.existing, true); assert.equal(posts, 1);
 });
 
 test('authUrl asks for offline access with consent and carries state', () => {
@@ -161,7 +233,7 @@ test('exchangeCode uses the accounts-server from the redirect and needs a refres
   const t = await exchangeCode({ code: 'c', clientId: 'cid', clientSecret: 's', dc: 'us', accountsServer: 'https://accounts.zoho.in', fetch: f });
   assert.equal(t.dc, 'in');
   assert.equal(t.refreshToken, 'RT2');
-  assert.match(f.calls[0].url, /^https:\/\/accounts\.zoho\.in\/oauth\/v2\/token\?/);
+  assert.equal(f.calls[0].url, 'https://accounts.zoho.in/oauth/v2/token');
   const noRt = fakeFetch(() => ({ body: { access_token: 'AT' } }));
   await assert.rejects(exchangeCode({ code: 'c', clientId: 'x', clientSecret: 'y', fetch: noRt }), /no refresh_token/);
 });

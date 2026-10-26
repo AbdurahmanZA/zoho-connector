@@ -1,5 +1,5 @@
 'use strict';
-const { datacenter } = require('./datacenters');
+const { datacenter, trustedAccountsServer } = require('./datacenters');
 
 // Base path and organisation parameter per Zoho product. Books, Invoice and Inventory scope
 // every call to an organization_id; CRM does not.
@@ -35,7 +35,7 @@ class ZohoClient {
     this.clientId = opts.clientId;
     this.clientSecret = opts.clientSecret;
     this.refreshToken = opts.refreshToken;
-    this.accountsServer = (opts.accountsServer || dc.accounts).replace(/\/+$/, '');
+    this.accountsServer = opts.accountsServer ? trustedAccountsServer(opts.accountsServer) : dc.accounts;
     this.apiDomain = (opts.apiDomain || '').replace(/\/+$/, '') || null;   // set from the token response if empty
     this.defaultApiDomain = dc.api;
     this.organizationId = opts.organizationId || null;
@@ -71,13 +71,16 @@ class ZohoClient {
   }
 
   async _refresh() {
-    const q = new URLSearchParams({
+    // Secrets go in the form body, not the URL, so they never land in proxy or access logs.
+    const form = new URLSearchParams({
       refresh_token: this.refreshToken, client_id: this.clientId,
       client_secret: this.clientSecret, grant_type: 'refresh_token',
     });
-    const r = await this.fetch(`${this.accountsServer}/oauth/v2/token?${q}`, {
-      method: 'POST', signal: AbortSignal.timeout(this.timeoutMs),
+    const r = await this.fetch(`${this.accountsServer}/oauth/v2/token`, {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form.toString(),
+      signal: AbortSignal.timeout(this.timeoutMs),
     });
+    this._lastRefresh = Date.now();
     const data = await r.json().catch(() => ({}));
     // Zoho answers token errors with HTTP 200 and {"error": "..."}.
     if (!r.ok || data.error || !data.access_token) {
@@ -104,25 +107,41 @@ class ZohoClient {
     if (svc.org && org) q.set('organization_id', org);
     else if (svc.org && orgId !== false) throw new Error('organizationId is required for ' + service + ' (set ZOHO_ORG_ID)');
 
+    // Only reads are safe to repeat after a server error or a dropped connection: a retried POST
+    // can create a second invoice. Every method may retry a 429, which Zoho answers before acting.
+    const idempotent = method === 'GET' || method === 'HEAD';
     for (let attempt = 0, refreshed = false; ; attempt++) {
       const token = await this.accessToken();
       const url = `${this.apiDomain || this.defaultApiDomain}${svc.base}${path}${q.size ? '?' + q : ''}`;
-      const r = await this.fetch(url, {
-        method,
-        headers: { Authorization: `Zoho-oauthtoken ${token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
-        body: body ? JSON.stringify(body) : undefined,
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
+      let r;
+      try {
+        r = await this.fetch(url, {
+          method,
+          headers: { Authorization: `Zoho-oauthtoken ${token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+          body: body ? JSON.stringify(body) : undefined,
+          signal: AbortSignal.timeout(this.timeoutMs),
+        });
+      } catch (e) {
+        if (idempotent && attempt < this.maxRetries) { await sleep(Math.min(30000, 1000 * 2 ** attempt)); continue; }
+        throw new ZohoError(`Zoho ${method} ${path}: ${e.message}`, { status: 0 });
+      }
       const text = await r.text();
       let data;
       try { data = text ? JSON.parse(text) : {}; } catch { data = { message: text.slice(0, 300) }; }
 
-      if (r.status === 401 && !refreshed) {          // token revoked or expired early: refresh once
-        refreshed = true; this._token = null; continue;
+      // 401: the token expired early or was revoked. Refresh once, and only if nobody else already
+      // replaced this token; a 401 that survives a fresh token is a scope/permission problem, so
+      // don't burn Zoho's per-refresh-token limit retrying it.
+      if (r.status === 401 && !refreshed && Date.now() - (this._lastRefresh || 0) > 30000) {
+        refreshed = true;
+        if (this._token === token) this._token = null;
+        continue;
       }
-      if ((r.status === 429 || r.status >= 500) && attempt < this.maxRetries) {
+      if ((r.status === 429 || (idempotent && r.status >= 500)) && attempt < this.maxRetries) {
         const ra = r.headers.get('retry-after');
-        const wait = ra !== null && ra !== '' && !isNaN(ra) ? Math.min(60000, Number(ra) * 1000) : Math.min(30000, 1000 * 2 ** attempt);
+        // Zoho's limit is per minute, so back off in seconds, not milliseconds.
+        const wait = ra !== null && ra !== '' && !isNaN(ra) ? Math.min(60000, Number(ra) * 1000)
+          : Math.min(60000, (r.status === 429 ? 5000 : 1000) * 2 ** attempt);
         await sleep(wait);
         continue;
       }

@@ -20,6 +20,12 @@ if (!file) { console.log('usage: node --env-file=.env examples/crm-sync.js <crm.
 
 const MAP_FILE = process.env.ZOHO_ID_MAP || path.join(path.dirname(file), 'zoho-ids.json');
 
+/** Write the id map atomically (temp file + rename): a power cut never leaves half a file. */
+function saveIds(ids) {
+  fs.writeFileSync(MAP_FILE + '.tmp', JSON.stringify(ids, null, 2));
+  fs.renameSync(MAP_FILE + '.tmp', MAP_FILE);
+}
+
 /** Your CRM record -> a Zoho Books contact. Change this to your own fields. */
 function toZoho(c) {
   return {
@@ -56,6 +62,7 @@ async function main() {
       }
       const { contact, action } = await books.upsertContact(toZoho(rec), { zohoId: ids[rec.id], email });
       ids[rec.id] = contact.contact_id;
+      saveIds(ids);                         // after every success, so a crash mid-run loses nothing
       tally[action]++;
       console.log(`${action}  ${rec.company}  -> zoho ${contact.contact_id}`);
     } catch (e) {
@@ -63,7 +70,6 @@ async function main() {
       console.error(`FAILED  ${rec.company}: ${e.message}`);
     }
   }
-  if (apply) fs.writeFileSync(MAP_FILE, JSON.stringify(ids, null, 2));
   console.log('\n' + Object.entries(tally).filter(([, n]) => n).map(([k, n]) => `${n} ${k}`).join(', ') +
               (apply ? '' : '\nDry run - nothing was written. Add --apply to sync.'));
 }
