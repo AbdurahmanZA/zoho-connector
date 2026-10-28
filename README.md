@@ -1,5 +1,7 @@
 # Zoho Connector
 
+[![tests](https://github.com/AbdurahmanZA/zoho-connector/actions/workflows/test.yml/badge.svg)](https://github.com/AbdurahmanZA/zoho-connector/actions/workflows/test.yml) [![licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
+
 **Connect your own CRM to Zoho Books, and have it still work next month.**
 
 Getting a token out of Zoho takes an afternoon. Keeping two systems in agreement takes longer:
